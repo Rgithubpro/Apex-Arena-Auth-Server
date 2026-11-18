@@ -13,6 +13,12 @@ process.env.ADMIN_API_KEY = 'admin-secret';
 process.env.USERNAME_RULES_REFRESH_SECONDS = '1';
 process.env.GOOGLE_CLIENT_ID = 'google-id';
 process.env.GOOGLE_CLIENT_SECRET = 'google-secret';
+process.env.GITHUB_CLIENT_ID = 'gh-id';
+process.env.GITHUB_CLIENT_SECRET = 'gh-secret';
+process.env.ROBLOX_CLIENT_ID = 'rb-id';
+process.env.ROBLOX_CLIENT_SECRET = 'rb-secret';
+process.env.DISABLED_PROVIDERS = 'roblox';
+process.env.STEAM_ENABLED = 'true';
 process.env.AUTH_JWT_PRIVATE_KEY = Buffer.from(
   generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey.export({ type: 'pkcs8', format: 'pem' }),
 ).toString('base64');
@@ -94,7 +100,7 @@ section('health + discovery');
   const r = await app.inject({ method: 'GET', url: '/health' });
   check('health ok without touching the database', r.statusCode === 200);
   const p = await call(null, 'GET', '/auth/providers');
-  check('only configured providers are listed', JSON.stringify(p.body.providers) === '["google"]', p.body);
+  check('only configured, not-disabled providers are listed (Roblox is switched off)', JSON.stringify(p.body.providers) === '["google","github","steam"]', p.body);
   const jwks = await call(null, 'GET', '/.well-known/jwks.json');
   check('jwks publishes a public ES256 key', jwks.body.keys?.[0]?.alg === 'ES256' && !jwks.body.keys[0].d);
 }
@@ -346,6 +352,70 @@ section('third-party login (Google, with the provider mocked)');
   globalThis.fetch = realFetch;
 }
 
+section('GitHub, Steam (OpenID 2.0) and provider switches');
+{
+  const realFetch = globalThis.fetch;
+  let steamAnswer = 'ns:http://specs.openid.net/auth/2.0\nis_valid:true\n';
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    const json = (o) => new Response(JSON.stringify(o), { status: 200, headers: { 'content-type': 'application/json' } });
+    if (u.startsWith('https://steamcommunity.com/openid/login')) return new Response(steamAnswer, { status: 200 });
+    if (u.includes('github.com/login/oauth/access_token')) return json({ access_token: 'gh-token' });
+    if (u.includes('api.github.com/user')) return json({ id: 4242, login: 'octo' });
+    throw new Error(`unexpected fetch ${u}`);
+  };
+
+  async function steamFlow(device, mutate = (q) => q) {
+    const prep = await call(device, 'POST', '/auth/oauth/steam/prepare', { body: { return_to: 'https://game.example/Apex-Arena/' } });
+    const st = new URL(new URL(prep.body.url).searchParams.get('openid.return_to')).searchParams.get('state');
+    const id = 'https://steamcommunity.com/openid/id/76561198000000001';
+    const query = mutate({
+      state: st, 'openid.ns': 'http://specs.openid.net/auth/2.0', 'openid.mode': 'id_res',
+      'openid.op_endpoint': 'https://steamcommunity.com/openid/login', 'openid.claimed_id': id, 'openid.identity': id,
+      'openid.return_to': `${BASE}/auth/oauth/steam/callback?state=${st}`,
+      'openid.response_nonce': new Date().toISOString().replace(/\.\d+Z$/, 'Z') + 'abc', 'openid.assoc_handle': '1234',
+      'openid.signed': 'signed,op_endpoint,claimed_id,identity,return_to,response_nonce,assoc_handle', 'openid.sig': 'x',
+    });
+    const cb = await call(null, 'GET', '/auth/oauth/steam/callback', { query });
+    return { prep: new URL(prep.body.url), params: new URLSearchParams(new URL(cb.headers.location).hash.slice(1)) };
+  }
+
+  const sdev = await newDevice();
+  const ok = await steamFlow(sdev);
+  check('steam: prepare builds an OpenID URL', ok.prep.hostname === 'steamcommunity.com' && ok.prep.searchParams.get('openid.mode') === 'checkid_setup');
+  const code = ok.params.get('auth_code');
+  check('steam: a valid answer hands back a one-time code', !!code, ok.params.toString());
+  const ex = await call(sdev, 'POST', '/auth/oauth/exchange', { body: { code } });
+  check('steam: exchange creates a steam account (no e-mail needed)', ex.status === 201 && ex.body.user.method === 'steam' && ex.body.user.needs_username, ex.body);
+
+  const bad = async (name, mutate) => check(`steam: ${name}`, (await steamFlow(await newDevice(), mutate)).params.get('auth_error') === 'provider_error');
+  await bad('wrong return_to is refused', (q) => ({ ...q, 'openid.return_to': `${BASE}/auth/oauth/steam/callback?state=other` }));
+  await bad('a forged id outside the signature is refused', (q) => ({ ...q, 'openid.signed': 'signed,op_endpoint,return_to,response_nonce' }));
+  await bad('an old nonce is refused', (q) => ({ ...q, 'openid.response_nonce': '2020-01-01T00:00:00Zabc' }));
+  await bad('a non-steam id is refused', (q) => ({ ...q, 'openid.claimed_id': 'https://evil.example/id/76561198000000001' }));
+  steamAnswer = 'ns:http://specs.openid.net/auth/2.0\nis_valid:false\n';
+  await bad('steam saying "not valid" is refused', (q) => q);
+  steamAnswer = 'ns:http://specs.openid.net/auth/2.0\nis_valid:true\n';
+  const cancelPrep = await call(await newDevice(), 'POST', '/auth/oauth/steam/prepare', { body: { return_to: 'https://game.example/' } });
+  const cst = new URL(new URL(cancelPrep.body.url).searchParams.get('openid.return_to')).searchParams.get('state');
+  const cancel = await call(null, 'GET', '/auth/oauth/steam/callback', { query: { state: cst, 'openid.mode': 'cancel' } });
+  check('steam: cancelling is reported as access_denied', new URLSearchParams(new URL(cancel.headers.location).hash.slice(1)).get('auth_error') === 'access_denied');
+
+  const gdev = await newDevice();
+  const gp = await call(gdev, 'POST', '/auth/oauth/github/prepare', { body: { return_to: 'https://game.example/' } });
+  const gurl = new URL(gp.body.url);
+  check('github: no extra permissions requested, PKCE sent', gurl.hostname === 'github.com' && !gurl.searchParams.has('scope') && gurl.searchParams.get('code_challenge_method') === 'S256', gp.body);
+  const gcb = await call(null, 'GET', '/auth/oauth/github/callback', { query: { code: 'c', state: gurl.searchParams.get('state') } });
+  const gcode = new URLSearchParams(new URL(gcb.headers.location).hash.slice(1)).get('auth_code');
+  const gex = await call(gdev, 'POST', '/auth/oauth/exchange', { body: { code: gcode } });
+  check('github: exchange creates a github account', gex.status === 201 && gex.body.user.method === 'github', gex.body);
+
+  const off = await call(await newDevice(), 'POST', '/auth/oauth/roblox/prepare', { body: { return_to: 'https://game.example/' } });
+  check('roblox is switched off by DISABLED_PROVIDERS even though its credentials are set', off.status === 503, off.body);
+
+  globalThis.fetch = realFetch;
+}
+
 section('delete e-mail account');
 {
   const wrong = await call(dev, 'DELETE', '/me', { token: alice.access_token, body: { password: 'nope' } });
@@ -426,6 +496,79 @@ section('username filter');
   check('disabling a rule in the table goes live too', (await verdict('MyDashBad')).available === true);
 }
 
+section('ban reasons, heartbeat, deletion, schema upgrade');
+{
+  const admin = (method, path, body) =>
+    app.inject({
+      method,
+      url: path,
+      headers: { 'x-admin-key': 'admin-secret', ...(body ? { 'content-type': 'application/json' } : {}) },
+      payload: body ? JSON.stringify(body) : undefined,
+    });
+  const dA = await newDevice();
+  const dB = await newDevice();
+
+  const dave = await call(dA, 'POST', '/auth/signup', { body: { email: 'dave@x.nl', password: 'Password123', username: 'Dave_1' } });
+  const daveB = await call(dB, 'POST', '/auth/login', { body: { email: 'dave@x.nl', password: 'Password123' } });
+  const ok = await call(dB, 'GET', '/me/status', { token: daveB.body.access_token });
+  check('heartbeat is fine for a normal player', ok.status === 200 && ok.body.ok === true, ok.body);
+
+  const ban = await admin('POST', '/admin/ban', { username: 'dave_1', public_reason: 'Cheating in matches', private_reason: 'seen by mod Sam, clip 1234' });
+  check('ban with a public and a private reason', ban.statusCode === 200, ban.body);
+
+  const hb = await call(dB, 'GET', '/me/status', { token: daveB.body.access_token });
+  check('the other device learns about the ban at its next heartbeat (public reason only)',
+    hb.status === 403 && hb.body.error === 'account_banned' && hb.body.public_reason === 'Cheating in matches' && !JSON.stringify(hb.body).includes('Sam'), hb.body);
+  const refresh = await call(dA, 'POST', '/auth/refresh', { body: { refresh_token: dave.body.refresh_token } });
+  check('refreshing a banned session says "banned", not a generic error', refresh.status === 403 && refresh.body.public_reason === 'Cheating in matches', refresh.body);
+  const login = await call(dA, 'POST', '/auth/login', { body: { email: 'dave@x.nl', password: 'Password123' } });
+  check('login shows the public reason and never the private one', login.status === 403 && login.body.public_reason === 'Cheating in matches' && !JSON.stringify(login.body).includes('clip'), login.body);
+  const info = JSON.parse((await admin('GET', '/admin/user?username=Dave_1')).body).user;
+  check('admin lookup shows both reasons', info.ban_public_reason === 'Cheating in matches' && info.ban_reason.includes('clip 1234'), info);
+
+  await admin('POST', '/admin/unban', { username: 'Dave_1' });
+  const cleared = JSON.parse((await admin('GET', '/admin/user?username=Dave_1')).body).user;
+  check('unban clears both reasons', cleared.ban_reason === null && cleared.ban_public_reason === null, cleared);
+
+  await admin('POST', '/admin/ban', { username: 'Dave_1', reason: 'old style' });
+  const legacy = await call(dA, 'POST', '/auth/login', { body: { email: 'dave@x.nl', password: 'Password123' } });
+  const legacyInfo = JSON.parse((await admin('GET', '/admin/user?username=Dave_1')).body).user;
+  check('a plain "reason" is private (nothing shown to the player)', legacy.status === 403 && legacy.body.public_reason === null && legacyInfo.ban_reason === 'old style', legacy.body);
+  await admin('POST', '/admin/unban', { username: 'Dave_1' });
+
+  // ---- deletion reaches the other devices and the game server
+  const eve = await call(dA, 'POST', '/auth/signup', { body: { email: 'eve@x.nl', password: 'Password123', username: 'Eve_1' } });
+  const eveB = await call(dB, 'POST', '/auth/login', { body: { email: 'eve@x.nl', password: 'Password123' } });
+  const del = await call(dA, 'DELETE', '/me', { token: eve.body.access_token, body: { password: 'Password123' } });
+  check('delete works', del.status === 200, del.body);
+  const gone = await call(dB, 'GET', '/me/status', { token: eveB.body.access_token });
+  check('the other device is told the account is gone', gone.status === 401 && gone.body.error === 'account_deleted', gone.body);
+  const noTicket = await call(dB, 'POST', '/game/ticket', { token: eveB.body.access_token, body: {} });
+  check('...and cannot get a join ticket any more', noTicket.status === 401, noTicket.body);
+  const bans = JSON.parse((await app.inject({ method: 'GET', url: '/game/bans', headers: { 'x-game-server-key': 'game-secret' } })).body);
+  check('the game server list includes the deleted account', bans.deleted.includes(eve.body.user.id), bans);
+
+  // ---- game data tables listed in src/user-data.js are wiped in the same transaction
+  const { USER_DATA_TABLES } = await import('../src/user-data.js');
+  await db.execute(`CREATE TABLE test_player_data (user_id TEXT, score INTEGER)`);
+  USER_DATA_TABLES.push({ table: 'test_player_data', column: 'user_id' });
+  const fay = await call(dA, 'POST', '/auth/signup', { body: { email: 'fay@x.nl', password: 'Password123', username: 'Fay_1' } });
+  await db.execute({ sql: `INSERT INTO test_player_data VALUES (?, 5)`, args: [fay.body.user.id] });
+  const delFay = await call(dA, 'DELETE', '/me', { token: fay.body.access_token, body: { password: 'Password123' } });
+  const left = await rowOf(`SELECT COUNT(*) AS n FROM test_player_data`);
+  check('deleting an account also clears the listed game-data tables', delFay.status === 200 && Number(left.n) === 0, left);
+  USER_DATA_TABLES.length = 0;
+
+  // ---- an install on the previous schema version is upgraded in place
+  await db.execute(`ALTER TABLE auth_users DROP COLUMN ban_public_reason`);
+  await db.execute(`UPDATE auth_meta SET value = '2' WHERE key = 'schema_version'`);
+  await initSchema();
+  const columns = (await db.execute(`PRAGMA table_info(auth_users)`)).rows.map((r) => r.name);
+  const version = await rowOf(`SELECT value FROM auth_meta WHERE key = 'schema_version'`);
+  await db.execute(`INSERT INTO auth_users (id, method, provider_uid, created_at, last_seen_at) VALUES ('mig-test', 'twitch', 'tw-1', 1, 1)`);
+  check('an install on schema v2 gets the new column and the new version', columns.includes('ban_public_reason') && version.value === '4', { columns, version });
+}
+
 section('database cost: every hot query must use an index');
 {
   const queries = {
@@ -433,7 +576,7 @@ section('database cost: every hot query must use an index');
     'username check': [`SELECT 1 FROM auth_users WHERE username_lower = ? LIMIT 1`, ['x']],
     'refresh (join)': [`SELECT s.user_id, u.id FROM auth_sessions s JOIN auth_users u ON u.id = s.user_id WHERE s.id = ?`, ['x']],
     'revoke other devices': [`UPDATE auth_sessions SET revoked_at = 1 WHERE user_id = ? AND id <> ? AND revoked_at IS NULL`, ['x', 'y']],
-    'ban list at startup': [`SELECT id FROM auth_users WHERE banned = 1`, []],
+    'ban list at startup': [`SELECT id, ban_public_reason FROM auth_users WHERE banned = 1`, []],
     'guest cleanup': [`DELETE FROM auth_users WHERE method = 'guest' AND last_seen_at < ? AND banned = 0`, [1]],
     'pending cleanup': [`DELETE FROM auth_users WHERE username IS NULL AND created_at < ? AND banned = 0`, [1]],
     'expired sessions': [`DELETE FROM auth_sessions WHERE expires_at < ?`, [1]],
@@ -444,7 +587,7 @@ section('database cost: every hot query must use an index');
   for (const [name, [sql, args]] of Object.entries(queries)) {
     const plan = (await db.execute({ sql: `EXPLAIN QUERY PLAN ${sql}`, args })).rows.map((r) => r.detail).join(' | ');
     // Scanning the partial index that only holds banned players is fine: it reads nothing else.
-    check(`${name}: ${plan}`, !/\bSCAN\b/.test(plan) || /COVERING INDEX auth_users_banned/.test(plan));
+    check(`${name}: ${plan}`, !/\bSCAN\b/.test(plan) || /INDEX auth_users_banned/.test(plan));
   }
 }
 

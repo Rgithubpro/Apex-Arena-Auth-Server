@@ -65,6 +65,11 @@ function oauthProvider(prefix, extra = {}) {
   return { clientId, clientSecret, ...extra };
 }
 
+// DISABLED_PROVIDERS=roblox,twitch hides providers without removing their credentials,
+// so any provider can be switched off and on again from the Render dashboard.
+const disabledProviders = new Set((process.env.DISABLED_PROVIDERS || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean));
+const enabledIf = (name, provider) => (provider && !disabledProviders.has(name) ? provider : null);
+
 const trustProxyHops = intEnv('TRUST_PROXY_HOPS', 0);
 
 const tursoUrl = required('TURSO_DATABASE_URL');
@@ -88,9 +93,12 @@ export const config = {
   gameServerSecret: process.env.GAME_SERVER_SECRET || undefined,
 
   providers: {
-    google: oauthProvider('GOOGLE'),
-    microsoft: oauthProvider('MICROSOFT', { tenant: process.env.MICROSOFT_TENANT || 'common' }),
-    discord: oauthProvider('DISCORD'),
+    google: enabledIf('google', oauthProvider('GOOGLE')),
+    discord: enabledIf('discord', oauthProvider('DISCORD')),
+    github: enabledIf('github', oauthProvider('GITHUB')),
+    twitch: enabledIf('twitch', oauthProvider('TWITCH')),
+    roblox: enabledIf('roblox', oauthProvider('ROBLOX')),
+    steam: enabledIf('steam', process.env.STEAM_ENABLED === 'true' ? {} : null), // Steam needs no credentials
   },
 
   // ---- Tokens & sessions ----
@@ -122,6 +130,7 @@ export const config = {
     oauth: { max: 20, timeWindow: '1 minute' },
     authed: { max: 30, timeWindow: '1 minute' },
     ticket: { max: 20, timeWindow: '1 minute' },
+    status: { max: 300, timeWindow: '1 minute' }, // heartbeat: every open game pings once a minute, many may share one school network
   },
   loginFailures: { max: 8, windowMs: 15 * 60 * 1000 }, // per e-mail address
 

@@ -10,9 +10,9 @@ import {
   refreshSession, logoutWithRefreshToken,
 } from '../accounts.js';
 import {
-  enabledProviders, getProvider, buildAuthorizeUrl, fetchProviderIdentity,
+  enabledProviders, getProvider, buildAuthorizeUrl, fetchProviderIdentity, isOpenIdProvider,
 } from '../oauth.js';
-import { oauthStates, oauthCodes, loginFailures, guestCreates, reauth } from '../memory-stores.js';
+import { oauthStates, oauthCodes, loginFailures, guestCreates, reauth, bannedError } from '../memory-stores.js';
 import { assertUsernameAllowed, isUsernameAllowed } from '../username-filter.js';
 
 const rl = (name) => ({ rateLimit: config.rateLimits[name] });
@@ -24,7 +24,7 @@ function body(request) {
 }
 
 function bannedCheck(user) {
-  if (user.banned) throw httpError(403, 'account_banned', 'This account is banned');
+  if (user.banned) throw bannedError(user.id, user.ban_public_reason);
 }
 
 /** Only addresses on the allow-list may receive a login (stops open redirects). */
@@ -248,13 +248,16 @@ export default async function authRoutes(app) {
       return reply.redirect(url.toString(), 302);
     };
 
-    if (error || typeof code !== 'string') {
-      return back({ auth_error: error === 'access_denied' ? 'access_denied' : 'provider_error' });
+    // Steam (OpenID 2.0) sends no "code": it signs the whole query string instead.
+    const openId = isOpenIdProvider(provider);
+    const cancelled = openId && request.query['openid.mode'] === 'cancel';
+    if (error || cancelled || (!openId && typeof code !== 'string')) {
+      return back({ auth_error: error === 'access_denied' || cancelled ? 'access_denied' : 'provider_error' });
     }
 
     let identity;
     try {
-      identity = await fetchProviderIdentity(provider, { code, codeVerifier: pending.codeVerifier });
+      identity = await fetchProviderIdentity(provider, { code, codeVerifier: pending.codeVerifier, query: request.query, state });
     } catch (err) {
       request.log.warn({ provider, err: err.message }, 'provider login failed');
       return back({ auth_error: 'provider_error' });

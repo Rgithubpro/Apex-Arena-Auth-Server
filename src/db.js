@@ -21,12 +21,12 @@ export function isUniqueViolation(err, columnFragment) {
 // Turso bills by rows SCANNED: a query without a matching index would read
 // the whole table. The schema only runs when auth_meta says it is out of date.
 // ---------------------------------------------------------------------------
-const SCHEMA_VERSION = 2;
-
-const SCHEMA = [
-  `CREATE TABLE IF NOT EXISTS auth_users (
+// The login method is checked in code (not by a CHECK constraint), so adding a provider
+// never needs a schema change.
+function authUsersTable(name) {
+  return `CREATE TABLE IF NOT EXISTS ${name} (
      id TEXT PRIMARY KEY,
-     method TEXT NOT NULL CHECK (method IN ('email','google','microsoft','discord','guest')),
+     method TEXT NOT NULL,
      provider_uid TEXT NOT NULL,
      email TEXT,
      email_verified INTEGER NOT NULL DEFAULT 0,
@@ -38,8 +38,28 @@ const SCHEMA = [
      tos_version TEXT,
      tos_accepted_at INTEGER,
      banned INTEGER NOT NULL DEFAULT 0,
-     ban_reason TEXT
-   )`,
+     ban_reason TEXT,
+     ban_public_reason TEXT
+   )`;
+}
+const USER_COLUMNS = 'id, method, provider_uid, email, email_verified, password_hash, username, username_lower, created_at, last_seen_at, tos_version, tos_accepted_at, banned, ban_reason, ban_public_reason';
+
+const SCHEMA_VERSION = 4;
+
+// Changes for installs that already exist. Fresh installs get everything from SCHEMA instead.
+const MIGRATIONS = {
+  3: [`ALTER TABLE auth_users ADD COLUMN ban_public_reason TEXT`], // public ban reason (shown to the player)
+  // One-time rebuild of auth_users without the old CHECK on the login method (the indexes are recreated by SCHEMA).
+  4: [
+    authUsersTable('auth_users_new'),
+    `INSERT INTO auth_users_new (${USER_COLUMNS}) SELECT ${USER_COLUMNS} FROM auth_users`,
+    `DROP TABLE auth_users`,
+    `ALTER TABLE auth_users_new RENAME TO auth_users`,
+  ],
+};
+
+const SCHEMA = [
+  authUsersTable('auth_users'),
   // One account per login method: e-mail address / provider id / guest device key.
   `CREATE UNIQUE INDEX IF NOT EXISTS auth_users_method_uid ON auth_users(method, provider_uid)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS auth_users_username ON auth_users(username_lower)`,
@@ -127,8 +147,17 @@ export async function initSchema() {
   const current = result.rows.length ? Number(result.rows[0].value) : 0;
   if (current >= SCHEMA_VERSION) return;
 
+  const migrations =
+    current === 0
+      ? []
+      : Object.entries(MIGRATIONS)
+          .filter(([version]) => Number(version) > current)
+          .sort(([a], [b]) => a - b)
+          .flatMap(([, statements]) => statements);
+
   await db.batch(
     [
+      ...migrations,
       ...SCHEMA,
       {
         sql: `INSERT INTO auth_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,

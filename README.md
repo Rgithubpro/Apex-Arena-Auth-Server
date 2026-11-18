@@ -9,7 +9,8 @@ Runs on Render, stores accounts in your existing Turso database (tables prefixed
 - **Access token** (30 min, kept in memory) + **refresh token** (rotated on every use, kept in IndexedDB). Re-using an old refresh token logs the session out everywhere.
 - **Guests** = that browser key. One key, one guest account; it cannot be copied to another device or upgraded to e-mail.
 - **Join tickets**: to enter a match the browser trades its token for a single-use ticket (30 s). The game server never sees long-lived tokens.
-- **Bans** are instant for joining (checked when the ticket is redeemed) and pushed to the game server by polling `/game/bans`.
+- **Bans** are instant for joining (checked when the ticket is redeemed) and pushed to the game server by polling `/game/bans`. All of the player's sessions are ended, and every open copy of the game finds out within about a minute (see *Bans, deletion and other devices*).
+- **Deleting an account** removes it completely: the account, its sessions, e-mail tokens and the rows of every table listed in `src/user-data.js`.
 - Sensitive actions (change password, delete account) need the password again, or a fresh Google/Microsoft/Discord login.
 
 ## Deploy on Render
@@ -27,7 +28,8 @@ Runs on Render, stores accounts in your existing Turso database (tables prefixed
 | `ALLOWED_ORIGINS` | `https://rgithubpro.github.io` (origins only, comma separated; add every site that hosts the game) |
 | `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` | same values as the data server |
 | `AUTH_JWT_PRIVATE_KEY`, `GAME_SERVER_SECRET`, `ADMIN_API_KEY` | from `npm run generate-keys` |
-| `GOOGLE_*`, `MICROSOFT_*`, `DISCORD_*` | from the steps below (each provider switches on when both of its values are set) |
+| `GOOGLE_*`, `DISCORD_*`, `GITHUB_*`, `TWITCH_*`, `ROBLOX_*` (each `_CLIENT_ID` + `_CLIENT_SECRET`), `STEAM_ENABLED=true` | from the steps below; a provider switches on when its values are set |
+| `DISABLED_PROVIDERS` | optional, e.g. `roblox`: hides a provider without removing its credentials, so you can switch it off and on from the Render dashboard |
 
 The tables are created automatically on first start.
 
@@ -36,7 +38,10 @@ The tables are created automatically on first start.
 Redirect URI to register at every provider: `PUBLIC_URL` + `/auth/oauth/<provider>/callback`
 
 - **Google**: console.cloud.google.com → APIs & Services → OAuth consent screen (External; scopes `openid`, `email`, `profile`; **publish the app**, otherwise only test users can log in) → Credentials → Create OAuth client ID → *Web application* → add the redirect URI `…/auth/oauth/google/callback`. Copy Client ID + secret into `GOOGLE_CLIENT_ID/SECRET`.
-- **Microsoft**: portal.azure.com → Microsoft Entra ID → App registrations → New registration → supported accounts: *any organizational directory and personal Microsoft accounts* → Redirect URI type **Web**: `…/auth/oauth/microsoft/callback` → Certificates & secrets → New client secret (copy the **Value**). Application (client) ID + secret into `MICROSOFT_CLIENT_ID/SECRET`.
+- **GitHub**: github.com → Settings → Developer settings → OAuth Apps → New OAuth App → callback URL `…/auth/oauth/github/callback` → copy Client ID, generate a client secret.
+- **Twitch**: dev.twitch.tv/console → Register Your Application → OAuth Redirect URL `…/auth/oauth/twitch/callback`, category *Website Integration* → copy Client ID, New Secret. (Twitch wants two-factor on your own Twitch account for this.)
+- **Roblox**: create.roblox.com → Credentials → OAuth 2.0 apps → redirect URL `…/auth/oauth/roblox/callback`, scope `openid`. Until Roblox approves the app it only works for a handful of users, so set `DISABLED_PROVIDERS=roblox` to hide it, and remove that when you are approved.
+- **Steam**: nothing to register. Set `STEAM_ENABLED=true` (the callback is `…/auth/oauth/steam/callback`, handled automatically).
 - **Discord**: discord.com/developers/applications → New Application → OAuth2 → add redirect `…/auth/oauth/discord/callback` → copy Client ID, Reset Secret → `DISCORD_CLIENT_ID/SECRET`.
 
 ## Folder structure
@@ -63,6 +68,7 @@ apex-arena-auth-server/        its own GitHub repo, deployed to Render
     ├── oauth.js               Google / Microsoft / Discord details
     ├── username-filter.js     username rules from Turso (see below)
     ├── guards.js              secret-header checks for game-server and admin calls
+    ├── user-data.js           list of game tables to wipe when an account is deleted
     ├── memory-stores.js       short-lived data kept in RAM (tickets, OAuth state, ...)
     ├── cleanup.js             deletes inactive guests and dead sessions
     ├── mailer.js              e-mail sending (prepared, off for now)
@@ -79,7 +85,7 @@ apex-arena-auth-server/        its own GitHub repo, deployed to Render
 | File | Where |
 |---|---|
 | `auth.js` (new) | `js/data/auth.js`, next to `localstorage.js`. It uses `export`, so list it in `manifest.config.json` as `"js/data/auth.js": "module"` (not `script`). Set `PROD_AUTH_URL` at the top. |
-| `welcome.js`, `welcome.html`, `welcome.css`, `home.js` | same place as your current copies (replace) |
+| `welcome.js`, `welcome.html`, `welcome.css`, `home.js`, `settings.html`, `settings.js`, `settings.css` | same place as your current copies (replace) |
 | `loading.js` | same place as your current copy (replace) |
 
 `loading.js` loads it with `resolveModuleUrl('js/data/auth.js', assetsVersion)`, exactly like `localstorage.js`, so the normal asset versioning applies. Make sure the service worker does not intercept or cache requests to the auth server's origin.
@@ -122,12 +128,28 @@ export class BattleRoom extends Room {
 // Every minute: kick anyone who got banned while playing.
 setInterval(async () => {
   const res = await fetch(`${AUTH_URL}/game/bans`, { headers: { 'x-game-server-key': SECRET } });
-  const { banned } = await res.json();
-  for (const id of banned) activeByUser.get(id)?.leave(4003);
+  const { banned, deleted } = await res.json();
+  for (const id of banned) activeByUser.get(id)?.leave(4003); // client shows the ban message
+  for (const id of deleted) activeByUser.get(id)?.leave(4004); // account was deleted
 }, 60_000);
 ```
 
-Ban from anywhere: `POST /admin/ban` with header `x-admin-key` and body `{ "username": "SomeName", "reason": "..." }` (also `/admin/unban`, `GET /admin/user?username=`).
+## Bans, deletion and other devices
+
+Ban from anywhere with header `x-admin-key`:
+
+```
+curl -X POST $PUBLIC_URL/admin/ban -H "x-admin-key: $ADMIN_API_KEY" -H "content-type: application/json" \
+  -d '{"username":"SomeName","public_reason":"Cheating in matches","private_reason":"clip 1234, seen by Sam"}'
+```
+
+- `public_reason` is shown to the player (loading-screen popup, or the login message). Leave it out and they just see "This account has been banned."
+- `private_reason` stays in the database for you (`GET /admin/user?username=SomeName`). A plain `reason` counts as private.
+- `/admin/unban` clears both. Banned accounts cannot delete themselves, so a ban cannot be dodged by deleting.
+
+How other devices find out, without a permanent connection (which suits Render's free tier badly): while the game is open it calls `GET /me/status` about once a minute and when the tab becomes visible again. Bans and deletions are checked in the server's memory, so this costs no database reads. The player then gets logged out; a ban shows the popup, a deletion goes back to the welcome screen. In a match, the game server's `/game/bans` poll kicks them (`banned` and, for the last ~35 minutes, `deleted`). A device that was closed at the time sees the message when it starts.
+
+Deleting an account: guests tap twice; e-mail accounts also type their password; Google / Microsoft / Discord accounts log in with that provider again to confirm. To make deletion cover your own game tables, list them in `src/user-data.js`, for example `{ table: 'player_progress', column: 'user_id' }`; the column must hold the player's auth id. If your `logs` ever contain player ids, they are not covered, so keep ids out of them or clear them separately, and say so in the privacy policy.
 
 ## Username filter
 
@@ -172,6 +194,9 @@ The filter runs when a name is checked on the signup form, at signup, and when a
 | Guest: first time / coming back | 1 | 2 / 1-2 |
 | Username or e-mail availability check | 1 | 0 |
 | Username filter (only while people are picking names) | 1 per minute (version check); the full rule list only after a change | 0 |
+| Heartbeat (`GET /me/status`, once a minute while the game is open) | 0 | 0 |
+| Ban, unban | 0-1 (the player) | 1 + their sessions |
+| Delete account | 0 | their rows in the tables above |
 | Access-token checks, join tickets, ban list, OAuth state | 0 | 0 |
 | Refresh while playing (every 30 min) | 2 | 1 |
 | Cleanup (every 12 h, only while awake) | about 0 | the rows it deletes |
