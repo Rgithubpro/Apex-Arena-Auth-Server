@@ -1,4 +1,5 @@
 import { config } from './config.js';
+import { httpError } from './errors.js';
 
 // ---------------------------------------------------------------------------
 // Short-lived things live in RAM instead of Turso on purpose: they expire in
@@ -50,6 +51,11 @@ export class TtlMap {
   sweep() {
     const now = Date.now();
     for (const [key, entry] of this.map) if (entry.expires <= now) this.map.delete(key);
+  }
+
+  keys() {
+    this.sweep();
+    return this.map.keys();
   }
 }
 
@@ -116,7 +122,15 @@ export const guestCreates = new Counter(config.guestCreatesPerIpPerDay, 24 * 60 
 
 /** Banned user ids. Loaded once at startup, kept in sync by the admin routes. */
 export const bannedUsers = new Set();
+export const bannedPublicReasons = new Map();
 export const banState = { version: 0 };
+export const deletedUsers = new TtlMap(35 * MINUTE, 50_000);
 
-const all = [oauthStates, oauthCodes, tickets, ticketOfUser, proofReplay, reauth, loginFailures, guestCreates];
+export function bannedError(userId, publicReason = bannedPublicReasons.get(userId) ?? null) {
+  const error = httpError(403, 'account_banned', 'This account is banned');
+  error.public_reason = publicReason ?? null;
+  return error;
+}
+
+const all = [oauthStates, oauthCodes, tickets, ticketOfUser, proofReplay, reauth, deletedUsers, loginFailures, guestCreates];
 setInterval(() => all.forEach((s) => s.sweep()), MINUTE).unref();

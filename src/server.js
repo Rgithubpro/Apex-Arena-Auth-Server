@@ -7,7 +7,7 @@ import { config } from './config.js';
 import { db, initSchema } from './db.js';
 import { HttpError } from './errors.js';
 import { enabledProviders } from './oauth.js';
-import { bannedUsers, banState } from './memory-stores.js';
+import { bannedUsers, bannedPublicReasons, banState } from './memory-stores.js';
 import { startCleanupLoop } from './cleanup.js';
 import authRoutes from './routes/auth.js';
 import meRoutes from './routes/me.js';
@@ -56,7 +56,11 @@ export async function buildApp({ logger = true } = {}) {
 
   app.setErrorHandler((err, request, reply) => {
     if (err instanceof HttpError) {
-      return reply.code(err.statusCode).send({ error: err.code, message: err.message });
+      return reply.code(err.statusCode).send({
+        error: err.code,
+        message: err.message,
+        ...(err.code === 'account_banned' ? { public_reason: err.public_reason ?? null } : {}),
+      });
     }
     if (err.statusCode && err.statusCode < 500) {
       // Fastify's own client errors (bad JSON, body too large, rate limit...)
@@ -86,9 +90,13 @@ export async function buildApp({ logger = true } = {}) {
 
 /** Loads the (small) list of banned players into memory. */
 export async function loadBans() {
-  const rs = await db.execute(`SELECT id FROM auth_users WHERE banned = 1`);
+  const rs = await db.execute(`SELECT id, ban_public_reason FROM auth_users WHERE banned = 1`);
   bannedUsers.clear();
-  for (const row of rs.rows) bannedUsers.add(row.id);
+  bannedPublicReasons.clear();
+  for (const row of rs.rows) {
+    bannedUsers.add(row.id);
+    bannedPublicReasons.set(row.id, row.ban_public_reason ?? null);
+  }
   banState.version++;
 }
 

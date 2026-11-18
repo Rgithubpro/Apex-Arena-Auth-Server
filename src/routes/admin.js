@@ -2,7 +2,7 @@ import { config } from '../config.js';
 import { db } from '../db.js';
 import { httpError } from '../errors.js';
 import { requireAdmin } from '../guards.js';
-import { bannedUsers, banState } from '../memory-stores.js';
+import { bannedUsers, bannedPublicReasons, banState } from '../memory-stores.js';
 import { getUserById, revokeAllSessions } from '../accounts.js';
 import { reloadUsernameRules, usernameRuleStats, isUsernameAllowed } from '../username-filter.js';
 
@@ -33,10 +33,19 @@ export default async function adminRoutes(app) {
     const user = await resolveTarget(b);
     if (!user) throw httpError(404, 'user_not_found', 'No such user');
 
-    const reason = typeof b.reason === 'string' ? b.reason.slice(0, 200) : null;
-    await db.execute({ sql: `UPDATE auth_users SET banned = 1, ban_reason = ? WHERE id = ?`, args: [reason, user.id] });
+    const privateReason = typeof b.private_reason === 'string'
+      ? b.private_reason.slice(0, 200)
+      : typeof b.reason === 'string' ? b.reason.slice(0, 200) : null;
+    const publicReason = typeof b.public_reason === 'string' && b.public_reason.trim()
+      ? b.public_reason.trim().slice(0, 200)
+      : null;
+    await db.execute({
+      sql: `UPDATE auth_users SET banned = 1, ban_reason = ?, ban_public_reason = ? WHERE id = ?`,
+      args: [privateReason, publicReason, user.id],
+    });
     await revokeAllSessions(user.id);
     bannedUsers.add(user.id);
+    bannedPublicReasons.set(user.id, publicReason);
     banState.version++;
     return { banned: user.id };
   });
@@ -45,8 +54,12 @@ export default async function adminRoutes(app) {
     const user = await resolveTarget(request.body || {});
     if (!user) throw httpError(404, 'user_not_found', 'No such user');
 
-    await db.execute({ sql: `UPDATE auth_users SET banned = 0, ban_reason = NULL WHERE id = ?`, args: [user.id] });
+    await db.execute({
+      sql: `UPDATE auth_users SET banned = 0, ban_reason = NULL, ban_public_reason = NULL WHERE id = ?`,
+      args: [user.id],
+    });
     bannedUsers.delete(user.id);
+    bannedPublicReasons.delete(user.id);
     banState.version++;
     return { unbanned: user.id };
   });

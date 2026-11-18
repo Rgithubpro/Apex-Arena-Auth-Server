@@ -4,7 +4,7 @@ import { db, nowSeconds } from './db.js';
 import { randomToken, sha256, safeEqual } from './crypto.js';
 import { httpError } from './errors.js';
 import { signAccessToken } from './tokens.js';
-import { bannedUsers } from './memory-stores.js';
+import { bannedUsers, bannedError } from './memory-stores.js';
 
 const DAY = 86_400;
 
@@ -226,7 +226,7 @@ export async function refreshSession(refreshToken, jkt) {
     sql: `SELECT s.user_id, s.device_jkt, s.current_hash, s.prev_hash, s.prev_at,
                  s.created_at AS session_created_at, s.expires_at, s.revoked_at,
                  u.id, u.method, u.username, u.email_verified, u.last_seen_at,
-                 u.tos_version, u.tos_accepted_at, u.banned
+                 u.tos_version, u.tos_accepted_at, u.banned, u.ban_public_reason
           FROM auth_sessions s JOIN auth_users u ON u.id = s.user_id
           WHERE s.id = ?`,
     args: [sessionId],
@@ -248,7 +248,7 @@ export async function refreshSession(refreshToken, jkt) {
   }
   if (row.banned || bannedUsers.has(row.user_id)) {
     await revokeSession(sessionId);
-    throw httpError(403, 'account_banned', 'This account is banned');
+    throw bannedError(row.user_id, row.ban_public_reason);
   }
   if (isPrevious) {
     const withinRetryWindow = row.prev_at && now - row.prev_at <= config.refreshGraceSeconds;
