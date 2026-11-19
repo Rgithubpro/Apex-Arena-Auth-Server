@@ -3,9 +3,7 @@ import { randomToken } from '../crypto.js';
 import { httpError } from '../errors.js';
 import { requireGameServer } from '../guards.js';
 import { jwks, requireAuth } from '../tokens.js';
-import {
-  tickets, ticketOfUser, bannedUsers, bannedError, banState, deletedUsers,
-} from '../memory-stores.js';
+import { tickets, ticketOfUser, bannedUsers, banState, deletedUsers, bannedError } from '../memory-stores.js';
 
 export default async function gameRoutes(app) {
   // Public key set: the game server can verify access tokens by itself with this.
@@ -40,7 +38,7 @@ export default async function gameRoutes(app) {
     if (!ticket) throw httpError(401, 'invalid_ticket', 'Ticket is invalid, expired or already used');
     if (ticketOfUser.get(ticket.userId) === ticketId) ticketOfUser.delete(ticket.userId);
     if (bannedUsers.has(ticket.userId)) throw bannedError(ticket.userId);
-    if (deletedUsers.has(ticket.userId)) throw httpError(401, 'account_deleted', 'This account no longer exists');
+    if (deletedUsers.has(ticket.userId)) throw httpError(401, 'invalid_ticket', 'This account was deleted');
     return { user_id: ticket.userId, username: ticket.username, method: ticket.method, session_id: ticket.sessionId };
   });
 
@@ -48,6 +46,6 @@ export default async function gameRoutes(app) {
   app.get('/game/bans', { preHandler: requireGameServer, config: { rateLimit: false } }, async () => ({
     version: banState.version,
     banned: [...bannedUsers],
-    deleted: [...deletedUsers.keys()],
+    deleted: deletedUsers.keys(), // deleted in the last ~35 min: kick them too
   }));
 }

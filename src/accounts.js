@@ -235,20 +235,23 @@ export async function refreshSession(refreshToken, jkt) {
   if (!row) throw invalidGrant();
 
   const now = nowSeconds();
-  if (row.revoked_at || row.expires_at <= now) throw invalidGrant();
 
   const hash = sha256(secret);
   const isCurrent = safeEqual(hash, row.current_hash);
   const isPrevious = !isCurrent && !!row.prev_hash && safeEqual(hash, row.prev_hash);
   if (!isCurrent && !isPrevious) throw invalidGrant(); // a guess, not a leaked token: nothing to revoke
 
+  // Banned: say so (now that we know the caller really holds this session's token)
+  // instead of a generic "log in again", so the game can show the ban message.
+  if (row.banned || bannedUsers.has(row.user_id)) {
+    if (!row.revoked_at) await revokeSession(sessionId);
+    throw bannedError(row.user_id, row.ban_public_reason);
+  }
+  if (row.revoked_at || row.expires_at <= now) throw invalidGrant();
+
   if (row.device_jkt !== jkt) {
     await revokeSession(sessionId);
     throw invalidGrant();
-  }
-  if (row.banned || bannedUsers.has(row.user_id)) {
-    await revokeSession(sessionId);
-    throw bannedError(row.user_id, row.ban_public_reason);
   }
   if (isPrevious) {
     const withinRetryWindow = row.prev_at && now - row.prev_at <= config.refreshGraceSeconds;

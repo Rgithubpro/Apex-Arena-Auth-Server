@@ -3,7 +3,7 @@ import { SignJWT, jwtVerify, EmbeddedJWK, exportJWK, calculateJwkThumbprint } fr
 import { config } from './config.js';
 import { sha256 } from './crypto.js';
 import { httpError } from './errors.js';
-import { proofReplay, bannedUsers, bannedError, deletedUsers } from './memory-stores.js';
+import { proofReplay, bannedUsers, deletedUsers, bannedError } from './memory-stores.js';
 
 const AUDIENCE = 'apex-arena';
 
@@ -102,7 +102,7 @@ export async function requireAuth(request) {
   const { jkt } = await verifyProof(request, { accessToken: token });
   if (jkt !== claims.cnf.jkt) throw httpError(401, 'invalid_dpop', 'DPoP key does not match the access token');
   if (bannedUsers.has(claims.sub)) throw bannedError(claims.sub);
-  if (deletedUsers.has(claims.sub)) throw httpError(401, 'account_deleted', 'This account no longer exists');
+  if (deletedUsers.has(claims.sub)) throw httpError(401, 'account_deleted', 'This account was deleted');
 
   request.auth = {
     userId: claims.sub,

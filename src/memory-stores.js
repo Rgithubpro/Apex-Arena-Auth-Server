@@ -53,9 +53,10 @@ export class TtlMap {
     for (const [key, entry] of this.map) if (entry.expires <= now) this.map.delete(key);
   }
 
+  /** Live keys (expired ones are dropped first). */
   keys() {
     this.sweep();
-    return this.map.keys();
+    return [...this.map.keys()];
   }
 }
 
@@ -122,14 +123,18 @@ export const guestCreates = new Counter(config.guestCreatesPerIpPerDay, 24 * 60 
 
 /** Banned user ids. Loaded once at startup, kept in sync by the admin routes. */
 export const bannedUsers = new Set();
-export const bannedPublicReasons = new Map();
 export const banState = { version: 0 };
-export const deletedUsers = new TtlMap(35 * MINUTE, 50_000);
 
-export function bannedError(userId, publicReason = bannedPublicReasons.get(userId) ?? null) {
-  const error = httpError(403, 'account_banned', 'This account is banned');
-  error.public_reason = publicReason ?? null;
-  return error;
+/** Public ban reasons (shown to the player), by user id. The private reason stays in the database. */
+export const banPublicReasons = new Map();
+
+/** Accounts deleted in the last ~35 minutes (a bit longer than an access token lives), so
+ *  other devices still holding a valid token find out, and the game server can kick them. */
+export const deletedUsers = new TtlMap(35 * MINUTE, 10_000);
+
+export function bannedError(userId, publicReason) {
+  const reason = publicReason ?? banPublicReasons.get(userId) ?? null;
+  return httpError(403, 'account_banned', 'This account is banned', { public_reason: reason });
 }
 
 const all = [oauthStates, oauthCodes, tickets, ticketOfUser, proofReplay, reauth, deletedUsers, loginFailures, guestCreates];

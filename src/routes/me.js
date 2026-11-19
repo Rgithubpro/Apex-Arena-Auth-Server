@@ -6,9 +6,9 @@ import { requireAuth, signAccessToken } from '../tokens.js';
 import {
   getUserById, publicUser, validateUsername, validatePassword, revokeAllSessions,
 } from '../accounts.js';
-import { loginFailures, reauth, deletedUsers } from '../memory-stores.js';
+import { loginFailures, reauth, deletedUsers, banState } from '../memory-stores.js';
 import { assertUsernameAllowed } from '../username-filter.js';
-import { USER_DATA_TABLES } from '../user-data.js';
+import { userDataDeleteStatements } from '../user-data.js';
 
 const opts = { preHandler: requireAuth, config: { rateLimit: config.rateLimits.authed } };
 
@@ -36,7 +36,10 @@ async function checkPassword(user, password) {
 }
 
 export default async function meRoutes(app) {
-  app.get('/me/status', opts, async () => ({ ok: true }));
+  // Heartbeat: the game calls this about once a minute while it is open. Bans and deletions are
+  // checked in memory by requireAuth, so this costs NO database access, and a banned or deleted
+  // player's other devices find out within about a minute.
+  app.get('/me/status', { preHandler: requireAuth, config: { rateLimit: config.rateLimits.status } }, async () => ({ ok: true }));
 
   app.get('/me', opts, async (request) => {
     const user = await loadUser(request);
@@ -116,20 +119,18 @@ export default async function meRoutes(app) {
       throw httpError(403, 'reauth_required', `Log in with ${user.method} again to confirm`);
     }
 
-    const gameDataDeletes = USER_DATA_TABLES.map(({ table, column }) => {
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(table) || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(column)) {
-        throw new Error('Invalid identifier in USER_DATA_TABLES');
-      }
-      return { sql: `DELETE FROM "${table}" WHERE "${column}" = ?`, args: [user.id] };
-    });
-    await db.batch([
-      ...gameDataDeletes,
-      { sql: `DELETE FROM auth_sessions WHERE user_id = ?`, args: [user.id] },
-      { sql: `DELETE FROM auth_email_tokens WHERE user_id = ?`, args: [user.id] },
-      { sql: `DELETE FROM auth_users WHERE id = ?`, args: [user.id] },
-    ], 'write');
-    deletedUsers.set(user.id, true);
+    await db.batch(
+      [
+        { sql: `DELETE FROM auth_sessions WHERE user_id = ?`, args: [user.id] },
+        { sql: `DELETE FROM auth_email_tokens WHERE user_id = ?`, args: [user.id] },
+        ...userDataDeleteStatements(user.id), // game data tables listed in src/user-data.js
+        { sql: `DELETE FROM auth_users WHERE id = ?`, args: [user.id] },
+      ],
+      'write',
+    );
     reauth.delete(request.auth.sessionId);
+    deletedUsers.set(user.id, true); // other devices and the game server find out
+    banState.version++;
     return { deleted: true };
   });
 }
