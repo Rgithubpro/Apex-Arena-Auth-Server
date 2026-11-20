@@ -31,7 +31,7 @@ export async function buildApp({ logger = true } = {}) {
   await app.register(cors, {
     origin: config.allowedOrigins,
     methods: ['GET', 'HEAD', 'POST', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'DPoP'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'DPoP', 'X-Dev-Key'],
     exposedHeaders: ['Date', 'Retry-After'], // Date lets the browser correct its clock for DPoP proofs
     credentials: false,
     maxAge: 600,
@@ -113,6 +113,7 @@ async function start() {
   try {
     await app.listen({ port: config.port, host: '0.0.0.0' });
     app.log.info({ providers: enabledProviders(), origins: config.allowedOrigins }, 'auth server ready');
+    if (config.devBypassKey) app.log.warn('DEV_BYPASS_KEY is set: requests carrying it skip the clock check of their proof');
   } catch (err) {
     app.log.error(err);
     process.exit(1);

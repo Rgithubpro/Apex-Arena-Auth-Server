@@ -19,6 +19,7 @@ process.env.ROBLOX_CLIENT_ID = 'rb-id';
 process.env.ROBLOX_CLIENT_SECRET = 'rb-secret';
 process.env.DISABLED_PROVIDERS = 'roblox';
 process.env.STEAM_ENABLED = 'true';
+process.env.DEV_BYPASS_KEY = 'dev-key-for-the-tests-0123456789abcdef';
 process.env.AUTH_JWT_PRIVATE_KEY = Buffer.from(
   generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey.export({ type: 'pkcs8', format: 'pem' }),
 ).toString('base64');
@@ -67,10 +68,11 @@ async function makeProof(device, method, path, token, overrides = {}) {
 }
 
 let ipCounter = 0;
-async function call(device, method, path, { body, token, query, ip, proof, overrides } = {}) {
+async function call(device, method, path, { body, token, query, ip, proof, overrides, devKey } = {}) {
   const headers = {};
   if (body !== undefined) headers['content-type'] = 'application/json';
   if (token) headers.authorization = `DPoP ${token}`;
+  if (devKey) headers['x-dev-key'] = devKey;
   if (device) headers.dpop = proof ?? (await makeProof(device, method, path, token, overrides));
   const qs = query ? `?${new URLSearchParams(query)}` : '';
   const res = await app.inject({
@@ -567,6 +569,32 @@ section('ban reasons, heartbeat, deletion, schema upgrade');
   const version = await rowOf(`SELECT value FROM auth_meta WHERE key = 'schema_version'`);
   await db.execute(`INSERT INTO auth_users (id, method, provider_uid, created_at, last_seen_at) VALUES ('mig-test', 'twitch', 'tw-1', 1, 1)`);
   check('an install on schema v2 gets the new column and the new version', columns.includes('ban_public_reason') && version.value === '4', { columns, version });
+}
+
+section('dev key: skips the clock check, nothing else');
+{
+  const DEV = 'dev-key-for-the-tests-0123456789abcdef';
+  const off = { iat: Math.floor(Date.now() / 1000) + 600 }; // stamped 10 minutes ahead of the server
+  const login = { email: 'bob@x.nl', password: 'Password123' };
+  const d = await newDevice();
+
+  const strict = await call(d, 'POST', '/auth/login', { body: login, overrides: off });
+  check('a proof stamped 10 minutes off is refused', strict.status === 401 && strict.body.error === 'invalid_dpop', strict.body);
+  const wrong = await call(d, 'POST', '/auth/login', { body: login, overrides: off, devKey: 'x'.repeat(40) });
+  check('a wrong dev key does not help', wrong.status === 401 && wrong.body.error === 'invalid_dpop', wrong.body);
+  const ok = await call(d, 'POST', '/auth/login', { body: login, overrides: off, devKey: DEV });
+  check('the right dev key skips the clock check', ok.status === 200 && ok.body.user.username === 'Bob_1', ok.body);
+
+  const noProof = await call(null, 'POST', '/auth/login', { body: login, devKey: DEV });
+  check('...but not the proof itself', noProof.status === 401 && noProof.body.error === 'dpop_required', noProof.body);
+  const badPw = await call(d, 'POST', '/auth/login', { body: { ...login, password: 'wrong-pass-1' }, overrides: off, devKey: DEV });
+  check('...nor the password', badPw.status === 401 && badPw.body.error === 'invalid_credentials', badPw.body);
+  const once = await makeProof(d, 'POST', '/auth/login', null, off);
+  const first = await call(d, 'POST', '/auth/login', { body: login, proof: once, devKey: DEV });
+  const replay = await call(d, 'POST', '/auth/login', { body: login, proof: once, devKey: DEV });
+  check('...nor replay protection', first.status === 200 && replay.status === 401 && replay.body.error === 'dpop_replay', replay.body);
+  const stolen = await call(await newDevice(), 'GET', '/me', { token: ok.body.access_token, overrides: off, devKey: DEV });
+  check('...nor the binding of tokens to their device key', stolen.status === 401, stolen.body);
 }
 
 section('database cost: every hot query must use an index');

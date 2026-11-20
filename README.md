@@ -151,6 +151,16 @@ How other devices find out, without a permanent connection (which suits Render's
 
 Deleting an account: guests tap twice; e-mail accounts also type their password; Google / Microsoft / Discord accounts log in with that provider again to confirm. To make deletion cover your own game tables, list them in `src/user-data.js`, for example `{ table: 'player_progress', column: 'user_id' }`; the column must hold the player's auth id. If your `logs` ever contain player ids, they are not covered, so keep ids out of them or clear them separately, and say so in the privacy policy.
 
+## Dev key (local development only)
+
+By design the server refuses a request whose signed proof is stamped more than about a minute away from the server's clock (a wrong device clock shows a clear message). To keep developing with a wrong clock, or any other test setup:
+
+1. `npm run generate-keys` prints a `DEV_BYPASS_KEY`. Put it in Render's environment (and in your local `.env` if you run the server locally). Without it the feature is completely off.
+2. On your own machine, copy `dev-key.example.js` to `js/data/dev-key.js` (next to `auth.js`), fill in the same value, and add `js/data/dev-key.js` to the `.gitignore` of your assets repo. The page only looks for this file on `localhost`, so the deployed site never loads it.
+3. Your requests now carry an `X-Dev-Key` header and the server skips the clock check for them.
+
+It deliberately skips **only the clock check**. The key travels with every request, so it shows up in DevTools and could be copied by a browser extension; if it did leak, the worst anyone could do is send a proof with the wrong time, which still needs a valid device key. A "skip all checks" master key would instead be a backdoor into every account. If you later need more (for example no rate limits while testing), say so and we add exactly that.
+
 ## Username filter
 
 Rules live in the `auth_username_rules` table in Turso, so you can change them without redeploying. A short starter list is created automatically (official-looking names plus a few obvious words); extend it yourself.

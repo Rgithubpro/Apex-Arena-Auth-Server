@@ -74,6 +74,12 @@ const trustProxyHops = intEnv('TRUST_PROXY_HOPS', 0);
 
 const tursoUrl = required('TURSO_DATABASE_URL');
 
+// Local development only (see README "Dev key"): a request carrying this secret skips the CLOCK check of its
+// proof. Nothing else is skipped. Long on purpose, because it travels with the requests of whoever uses it.
+if (process.env.DEV_BYPASS_KEY && process.env.DEV_BYPASS_KEY.length < 24) {
+  throw new Error('DEV_BYPASS_KEY must be at least 24 characters (npm run generate-keys makes a good one)');
+}
+
 export const config = {
   isProd,
   port: intEnv('PORT', 3001, 1),
@@ -90,6 +96,7 @@ export const config = {
 
   // Optional secrets: routes that need them fail closed (503) when unset.
   adminApiKey: process.env.ADMIN_API_KEY || undefined,
+  devBypassKey: process.env.DEV_BYPASS_KEY || undefined,
   gameServerSecret: process.env.GAME_SERVER_SECRET || undefined,
 
   providers: {

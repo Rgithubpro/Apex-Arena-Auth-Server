@@ -1,7 +1,7 @@
 import { createPrivateKey, createPublicKey } from 'node:crypto';
 import { SignJWT, jwtVerify, EmbeddedJWK, exportJWK, calculateJwkThumbprint } from 'jose';
 import { config } from './config.js';
-import { sha256 } from './crypto.js';
+import { sha256, safeEqual } from './crypto.js';
 import { httpError } from './errors.js';
 import { proofReplay, bannedUsers, deletedUsers, bannedError } from './memory-stores.js';
 
@@ -55,14 +55,22 @@ export async function verifyProof(request, { accessToken } = {}) {
   const proof = request.headers.dpop;
   if (!proof || typeof proof !== 'string') throw httpError(401, 'dpop_required', 'Missing DPoP proof');
 
+  // Proofs must be stamped within about a minute of THIS server's clock. A request that carries the secret
+  // DEV_BYPASS_KEY skips that one check (for local development). The key, signature, URL, replay protection
+  // and everything after this point still apply, so a leaked dev key cannot log anyone in.
+  const devKey = request.headers['x-dev-key'];
+  const timeChecks =
+    config.devBypassKey && typeof devKey === 'string' && safeEqual(devKey, config.devBypassKey)
+      ? {}
+      : { clockTolerance: 60, maxTokenAge: 120 };
+
   let payload;
   let protectedHeader;
   try {
     ({ payload, protectedHeader } = await jwtVerify(proof, EmbeddedJWK, {
       typ: 'dpop+jwt',
       algorithms: ['ES256'],
-      clockTolerance: 60,
-      maxTokenAge: 120,
+      ...timeChecks,
       requiredClaims: ['iat', 'jti', 'htm', 'htu'],
     }));
   } catch {

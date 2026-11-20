@@ -11,3 +11,6 @@ console.log('# Shared secret between the auth server and the (future) game serve
 console.log(`GAME_SERVER_SECRET=${randomBytes(32).toString('base64url')}\n`);
 console.log('# Key for the /admin routes (ban / unban)');
 console.log(`ADMIN_API_KEY=${randomBytes(32).toString('base64url')}`);
+
+console.log('\n# OPTIONAL, local development only: lets YOUR machine skip the clock check (see README "Dev key")');
+console.log(`DEV_BYPASS_KEY=${randomBytes(32).toString('base64url')}`);
