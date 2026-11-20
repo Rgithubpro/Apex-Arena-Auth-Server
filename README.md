@@ -1,8 +1,10 @@
-# Apex Arena auth server
+# Apex Arena Authentication Server
 
-E-mail + password, guest accounts, and Google / Microsoft / Discord login for Apex Arena.
-Runs on Render, stores accounts in your existing Turso database (tables prefixed `auth_`, never listed in the data server's `tables.config.js`).
+Authentication and account-service API for Apex Arena.
 
+- [Apex Arena](https://github.com/Rgithubpro/Apex-Arena)
+- [Apex Arena Assets](https://github.com/Rgithubpro/Apex-Arena-Assets)
+- [Apex Arena Database Server](https://github.com/Rgithubpro/Apex-Arena-Database-Server)
 ## How logins stay safe
 
 - The browser makes a **non-extractable key** (WebCrypto) and signs every request with it (DPoP). A stolen token is useless on another device.
